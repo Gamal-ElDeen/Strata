@@ -59,7 +59,23 @@ Prefill tok/s, same five runs: 5,269 greedy 3873.7, 4139.7, 4085.8, 4095.3, 4084
 
 `--spec-min-p 0.7`. Exit 0. Peak 32184 MiB. Decode tok/s: 141 greedy 159.8, 192.4, 192.7, 194.4, 191.0. 5,269 greedy 166.8, 179.7, 179.1, 162.8, 169.6. 24,267 sampled 207.4, 212.8, 214.2, 204.6, 207.1. Acceptance went up and decode did not. Not a candidate.
 
-13 pool workers (spec 4, min-p 0.5, suffix on). Exit 0. Peak 32184 MiB. The log shows 13 workers. Decode tok/s: 141 greedy 169.8, 206.8, 205.7, 205.0, 205.8. 5,269 greedy 181.1, 191.8, 189.8, 189.9, 180.2. 24,267 greedy 215.1, 197.7, 220.4, 206.6, 212.5. 24,267 sampled 221.0, 218.1, 232.2, 221.5, 222.2. Prefill on the 24,267-token greedy runs: 6986.7, 7066.5, 7062.4, 7040.9, 7055.6. Decode is the same or a bit faster than 19 workers, and prefill did not drop. The live unit was left at 19 workers.
+13 pool workers (spec 4, min-p 0.5, suffix on). Exit 0. Peak 32184 MiB. The log shows 13 workers. Decode tok/s: 141 greedy 169.8, 206.8, 205.7, 205.0, 205.8. 5,269 greedy 181.1, 191.8, 189.8, 189.9, 180.2. 24,267 greedy 215.1, 197.7, 220.4, 206.6, 212.5. 24,267 sampled 221.0, 218.1, 232.2, 221.5, 222.2. Prefill on the 24,267-token greedy runs: 6986.7, 7066.5, 7062.4, 7040.9, 7055.6. Decode is the same or a bit faster than 19 workers, and prefill did not drop.
+
+## Worker sweep and Nsight, 2026-10-21
+
+A later sweep remeasured 8, 10, 12, 13, 16, and 19 together, five runs, same prompts and the served binary. Prefill did not move (24,267-token greedy stayed about 6,970–7,075 tok/s). On the warm runs, 13 had the best point estimate on the long prompts. 19 was not faster, and it was the slowest sampled cell on the 24,267-token prompt (about 4% under 13). 8, 12, and 16 overlap 13 inside the noise band on most cells. The per-run table is in the session report. `strata-fp4-local.json` was then set to 13. The running engine command uses `--pool-workers 13`.
+
+Nsight Systems 2026.3.2, one 5,269-token request, 64 generated tokens, `--trace=cuda,osrt`. These tok/s are not comparable to the benchmark, because the tracer slows the process. Reports: `nsys-pool19.nsys-rep`, `nsys-pool13.nsys-rep`.
+
+| One traced request | 19 workers | 13 workers |
+|---|---|---|
+| Engine prefill / decode | 1370.6 ms / 519.2 ms | 1347.8 ms / 465.1 ms |
+| GPU busy over the request | 820 ms of 1904 ms (43%) | 820 ms of 1891 ms (43%) |
+| GPU busy during the prefill slice | 495 of 1371 ms (36%) | 481 of 1348 ms (36%) |
+| GPU busy during the decode slice | 325 of 533 ms (61%) | 340 of 543 ms (63%) |
+| `cudaStreamSynchronize` | 1134 ms, 645 calls | 1106 ms, 725 calls |
+
+The largest kernel class in the decode slice was `mul_mat_q` (112 ms at 19 workers, 114 ms at 13). NVFP4 GEMMs were about 35–37 ms. `cudaLaunchKernel` over the whole 19-worker request was 49 ms for 23,514 launches. Worker count did not change the idle fraction. The GPU is idle for most of prefill and for about two fifths of decode. Megakernel work stays on hold.
 
 `--suffix-draft 0` (spec 4). Exit 0. Peak 32166 MiB. Logged verify window 4 tokens. Decode tok/s: 141 greedy 165.2, 199.0, 200.0, 206.0, 191.6. 5,269 greedy 171.5, 188.2, 186.8, 181.8, 180.4. 24,267 greedy 207.8, 218.3, 188.9, 199.0, 218.7. 24,267 sampled 210.7, 222.5, 219.6, 220.5, 223.0. Decode did not fall. On these prompts the extra two suffix tokens are not paying for the wider window.
 
