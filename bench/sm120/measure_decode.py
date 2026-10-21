@@ -83,8 +83,8 @@ def requests(repeats: int):
     return out
 
 
-def base_cmd(binary: str, extra: list[str]) -> list[str]:
-    return [
+def base_cmd(binary: str, extra: list[str], with_mtp: bool) -> list[str]:
+    cmd = [
         binary, "--serve",
         "--pack", f"{PACK}/pack",
         "--native", f"{PACK}/dense.gguf",
@@ -98,7 +98,10 @@ def base_cmd(binary: str, extra: list[str]) -> list[str]:
         "--kv-resident", "32768",
         "--vram-reserve-mib", "512",
         "--pool-workers", "19",
-        "--mtp", f"{PACK}/mtp/rt",
+    ]
+    if with_mtp:
+        cmd.extend(["--mtp", f"{PACK}/mtp/rt"])
+    cmd.extend([
         "--spec", "4",
         "--spec-min-p", "0.5",
         "--adapt-every", "1",
@@ -106,7 +109,8 @@ def base_cmd(binary: str, extra: list[str]) -> list[str]:
         "--adapt-decay", "0.97",
         "--prompt-cache", "0",
         *extra,
-    ]
+    ])
+    return cmd
 
 
 def parse_done(line: str) -> dict:
@@ -143,6 +147,7 @@ def main() -> int:
     ap.add_argument("--binary", default=LIVE_BIN)
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--profile", action="store_true")
+    ap.add_argument("--no-mtp", action="store_true")
     ap.add_argument("extra", nargs="*")
     args = ap.parse_args()
     if port_open(12345):
@@ -159,7 +164,7 @@ def main() -> int:
     log_dir = ART / "phase0" / args.arm
     log_dir.mkdir(parents=True, exist_ok=True)
     reqs = requests(args.repeats)
-    cmd = base_cmd(args.binary, args.extra)
+    cmd = base_cmd(args.binary, args.extra, with_mtp=not args.no_mtp)
     env = os.environ.copy()
     env.update(QUALITY_ENV)
     if args.profile:
@@ -232,15 +237,28 @@ def main() -> int:
         return 1
     (log_dir / "status.txt").write_text("READY\n")
     assert proc.stdin is not None
-    for name, line in reqs:
+    # One request at a time. The 24k prompt line is larger than a default pipe,
+    # so writing the whole queue would block before the engine sees a newline.
+    for index, (name, line) in enumerate(reqs, start=1):
         proc.stdin.write((line + "\n").encode())
         proc.stdin.flush()
         (log_dir / "status.txt").write_text(f"SENT {name}\n")
-    if not done_n.wait(timeout=7200):
-        proc.kill()
-        stop.set()
-        (log_dir / "status.txt").write_text("FAILED request timeout\n")
-        return 1
+        deadline = time.monotonic() + 900
+        while True:
+            with lock:
+                got = len(lines_out)
+            if got >= index:
+                break
+            if proc.poll() is not None:
+                stop.set()
+                (log_dir / "status.txt").write_text(f"FAILED engine exited during {name}\n")
+                return 1
+            if time.monotonic() > deadline:
+                proc.kill()
+                stop.set()
+                (log_dir / "status.txt").write_text(f"FAILED timeout {name}\n")
+                return 1
+            time.sleep(0.2)
     proc.stdin.close()
     proc.wait(timeout=120)
     stop.set()
