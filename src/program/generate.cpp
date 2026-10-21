@@ -65,6 +65,7 @@
 #include "strata/core/native_head.hpp"
 #include "strata/core/verify.hpp"
 #include "strata/core/mtp.hpp"
+#include "strata/core/dflash.hpp"
 #include "strata/prefill/prefill.hpp"
 #if defined(STRATA_PREFILL_MMQ)
 #include "strata/prefill/moe_mmq.hpp"
@@ -670,6 +671,10 @@ struct Options {
     std::string window_hashes;
     /// Plan v0.3 P6: the MTP draft layer's runtime directory (tools/mtp_rt.py); drafts come from it.
     std::string mtp;
+    /// --dflash PACK: a DFL2 pack from tools/dflash_rt.py. Exclusive with --mtp.
+    /// The pack loads and is checked. The verify window still drafts with MTP only,
+    /// so a request that asks for this drafter stops before serving.
+    std::string dflash;
     int64_t mtp_window = 32768;   ///< the draft layer attends to the last N cells (0 = every cell)
     /// Plan v0.3 P6: the share (0..1) of each layer's distinct missed experts the GPU reads over PCIe from the
     /// pinned arena while the CPU computes the rest (verify windows).
@@ -929,6 +934,9 @@ void usage() {
                  "                       (default) or one per stream (llama.cpp's MTP graph)\n"
                  "  --mtp-q4 all|proj|head  opt-in: the draft layer's projections and/or draft head as 4-bit copies\n"
                  "  --mtp-draft-vocab FILE  opt-in: the draft head's token subset (default <mtp>/draft_vocab.bin)\n"
+                 "  --dflash PACK        opt-in: a DFlash2 DFL2 pack from tools/dflash_rt.py (not with --mtp).\n"
+                 "                       Loads and checks the pack. Drafting through the verify window is not\n"
+                 "                       connected yet, so serve stops instead of answering without it\n"
                  "  --control-vector-scaled FILE:SCALE[,...]  a control vector GGUF on the residual stream (llama.cpp's\n"
                  "                       format; --control-vector FILE = scale 1).  --serve: requests switch it (cvec=0|1)\n"
                  "  --control-vector-layer-range A B  the layers it follows (inclusive; default 1 .. the last)\n"
@@ -2580,6 +2588,7 @@ int main(int argc, char** argv) {
         else if (a == "--spec-follow") o.spec_follow = next("--spec-follow");
         else if (a == "--window-hashes") o.window_hashes = next("--window-hashes");
         else if (a == "--mtp") o.mtp = next("--mtp");
+        else if (a == "--dflash") o.dflash = next("--dflash");
         else if (a == "--mtp-window") o.mtp_window = std::atoll(next("--mtp-window"));
         else if (a == "--pcie-frac") o.pcie_frac = std::atof(next("--pcie-frac"));
         else if (a == "--adapt-every") o.adapt_every = std::atoi(next("--adapt-every"));
@@ -5354,6 +5363,30 @@ int main(int argc, char** argv) {
                                  "expert cache would otherwise hold\n", o.batch,
                          (double) bytes0 * o.batch / 1073741824.0);
         }
+    }
+
+    if (!o.dflash.empty() && !o.mtp.empty()) {
+        std::fprintf(stderr, "strata generate: --dflash and --mtp are different drafters; pass one\n");
+        return 1;
+    }
+    if (!o.dflash.empty()) {
+        strata::core::DFlashPack dflash_pack;
+        if (!dflash_pack.load(o.dflash, err)) {
+            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            return 1;
+        }
+        std::fprintf(stderr,
+                     "strata generate: --dflash %s loaded (%u tensors, %.2f GiB, block %u, layers",
+                     o.dflash.c_str(), static_cast<unsigned>(dflash_pack.tensors.size()),
+                     static_cast<double>(dflash_pack.weight_bytes()) / 1073741824.0, dflash_pack.block_size);
+        for (uint32_t i = 0; i < dflash_pack.n_target_layers; ++i) {
+            std::fprintf(stderr, "%s%d", i ? "," : " ", dflash_pack.target_layers[i]);
+        }
+        std::fprintf(stderr, ")\n");
+        std::fprintf(stderr,
+                     "strata generate: DFlash2 weights are loaded. The verify window does not draft with them yet, "
+                     "so this process will not serve.\n");
+        return 2;
     }
 
     // Secure MTP's CUDA0 allocations before the large host arena is registered with both CUDA contexts.
